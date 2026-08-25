@@ -1,139 +1,108 @@
 const express = require('express');
-const socket = require("socket.io")
+const socket = require("socket.io");
 const http = require("http");
-const {Chess} = require("chess.js")
+const { Chess } = require("chess.js");
 const path = require('path');
 
 const app = express();
-
 const server = http.createServer(app);
 const io = socket(server);
- 
+
 const chess = new Chess();
 
 let players = {};
-let currentPlayer = 'W';
- 
+let gameOver = false;
+
 app.set('view engine', 'ejs');
-app.use(express.static(path.join(__dirname,'public')));
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => {
-    res.render('index', {title: 'Chess Game'});
+    res.render('index', { title: 'Online Chess Game' });
 });
 
+// Socket.io Connection Logic
+io.on("connection", function(uniquesocket) {
+    console.log("Client connected:", uniquesocket.id);
 
-
-
-//main io socket section
-
-
-io.on("connection", function(uniquesocket){
-    console.log("Connected")  
-
-    if(!players.white){
+    // Assign player role (White, Black, or Spectator)
+    if (!players.white) {
         players.white = uniquesocket.id;
-        uniquesocket.emit("playerRole", "w")
-    }
-    else if(!players.black){
+        uniquesocket.emit("playerRole", "w");
+    } else if (!players.black) {
         players.black = uniquesocket.id;
-        uniquesocket.emit("playerRole", "b")
+        uniquesocket.emit("playerRole", "b");
+    } else {
+        uniquesocket.emit("spectatorRole");
     }
 
-    else{
-        uniquesocket.emit("spectatorRole")
-    }
+    // Sync board state & game status to newly connected client
+    uniquesocket.emit("boardState", chess.fen());
+    uniquesocket.emit("turn", chess.turn());
 
-    uniquesocket.on("disconnect", function(){
-        if(uniquesocket.id === players.white){
+    if (chess.isCheckmate()) uniquesocket.emit("gameStatus", "Checkmate!");
+    else if (chess.isCheck()) uniquesocket.emit("gameStatus", "Check!");
+    else if (chess.isDraw()) uniquesocket.emit("gameStatus", "Draw!");
+
+    // Handle Disconnect
+    uniquesocket.on("disconnect", function() {
+        console.log("Client disconnected:", uniquesocket.id);
+        if (uniquesocket.id === players.white) {
             delete players.white;
-        }
-        else if(uniquesocket.id === players.black){
+            io.emit("playerLeft", "White player disconnected");
+        } else if (uniquesocket.id === players.black) {
             delete players.black;
+            io.emit("playerLeft", "Black player disconnected");
         }
     });
 
-    
-// Track if game is over
-let gameOver = false;
+    // Handle Moves
+    uniquesocket.on("move", (move) => {
+        try {
+            if (gameOver) return;
 
-uniquesocket.on("move", (move) => {
-    try {
+            // Enforce turn order
+            if (chess.turn() === "w" && uniquesocket.id !== players.white) return;
+            if (chess.turn() === "b" && uniquesocket.id !== players.black) return;
 
-        // ❌ If game already ended → ignore moves
-        if (gameOver) return;
+            const result = chess.move(move);
 
-        // ✅ Only allow correct player to move
-        // chess.turn() tells whose turn it is ("w" or "b")
-        if (chess.turn() === "w" && uniquesocket.id !== players.white) return;
-        if (chess.turn() === "b" && uniquesocket.id !== players.black) return;
+            if (result) {
+                io.emit("lastMove", move);
+                io.emit("boardState", chess.fen());
 
-        // Try to make move using chess.js
-        const result = chess.move(move);
+                if (chess.isCheckmate()) {
+                    gameOver = true;
+                    io.emit("gameStatus", "Checkmate!");
+                } else if (chess.isCheck()) {
+                    io.emit("gameStatus", "Check!");
+                } else if (chess.isDraw()) {
+                    gameOver = true;
+                    io.emit("gameStatus", "Draw!");
+                } else {
+                    io.emit("gameStatus", "");
+                }
 
-        // If move is valid
-        if (result) {
-
-            // Send move to all clients
-            io.emit("lastMove", move);
-
-            // Send updated board state (FEN string)
-            io.emit("boardState", chess.fen());
-
-            // 🟢 Check game conditions after every move
-
-            if (chess.inCheck()) {
-                io.emit("gameStatus", "Check!");
+                io.emit("turn", chess.turn());
+            } else {
+                uniquesocket.emit("invalidMove", move);
             }
-
-            if (chess.inCheckmate()) {
-                gameOver = true;  // Stop further moves
-                io.emit("gameStatus", "Checkmate!");
-            }
-
-            if (chess.inDraw()) {
-                gameOver = true;
-                io.emit("gameStatus", "Draw!");
-            }
-
-            // Send whose turn it is
-            io.emit("turn", chess.turn());
-        }
-
-        else {
+        } catch (err) {
+            console.error("Move error:", err);
             uniquesocket.emit("invalidMove", move);
         }
+    });
 
-    } catch (err) {
-        console.log(err);
-        uniquesocket.emit("invalidMove", move);
-    }
+    // Handle Game Restart
+    uniquesocket.on("restartGame", () => {
+        chess.reset();
+        gameOver = false;
+        io.emit("boardState", chess.fen());
+        io.emit("gameStatus", "Game Restarted");
+        io.emit("turn", chess.turn());
+    });
 });
 
-    
-// Restart game
-uniquesocket.on("restartGame", () => {
-
-    // Reset chess board to starting position
-    chess.reset();
-
-    // Allow moves again
-    gameOver = false;
-
-    // Send fresh board state
-    io.emit("boardState", chess.fen());
-
-    // Clear status
-    io.emit("gameStatus", "Game Restarted");
-
-    // Reset turn to white
-    io.emit("turn", chess.turn());
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Chess server running on port ${PORT}`);
 });
-
-    
-});    
-
-server.listen(3000, () => {
-    console.log('Server is running on port 3000');
-}   );
-
-
